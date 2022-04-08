@@ -6,6 +6,7 @@
 #include <freertos/task.h>
 #include <string>
 #include "sdkconfig.h"
+#include "esp_event.h"
 
 static const char *TAG = "MAIN";
 #define LV_TICK_PERIOD_MS 1
@@ -15,7 +16,7 @@ static const char *TAG = "MAIN";
 //#define LGFX_AUTODETECT
 #include <LovyanGFX.h>
 #include <LGFX_AUTODETECT.hpp>
-
+#include "ws.h"
 static LGFX lcd;
 
 #include <lvgl.h>
@@ -26,17 +27,39 @@ static const uint16_t screenHeight = 320;
 static lv_disp_draw_buf_t draw_buf;
 static lv_color_t buf[screenWidth * 10];
 
+lv_obj_t *btn1;
+lv_obj_t *btn2;
+lv_obj_t *screenMain;
+lv_obj_t *label;
+lv_obj_t *lbl_kbd;
+lv_obj_t *lbl_status;
+
 /*** Function declaration ***/
 void display_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p);
 void touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data);
 void lv_button_demo(void);
-static void lv_tick_task(void *arg);
-
+void security_pad(void);
+esp_event_loop_handle_t loop_without_task;
+ESP_EVENT_DECLARE_BASE(TASK_EVENTS);         // declaration of the task events family
+ESP_EVENT_DEFINE_BASE(TASK_EVENTS);
 char txt[100];
 lv_obj_t *tlabel; // touch x,y label
 
 extern "C"
 {
+
+  
+
+
+static void application_task(void* args)
+{
+    while(1) {
+        ///* let the GUI do its work */
+        lv_timer_handler(); 
+        lv_tick_inc(LV_TICK_PERIOD_MS);
+        vTaskDelay(1);
+    }
+}
     void app_main(void)
     {
         lcd.init(); // Initialize LovyanGFX
@@ -66,32 +89,28 @@ extern "C"
         lv_indev_drv_register(&indev_drv);
 
         /* Create and start a periodic timer interrupt to call lv_tick_inc */
-        const esp_timer_create_args_t periodic_timer_args = {
-            .callback = &lv_tick_task,
-            .name = "periodic_gui"};
-        esp_timer_handle_t periodic_timer;
-        ESP_ERROR_CHECK(esp_timer_create(&periodic_timer_args, &periodic_timer));
-        ESP_ERROR_CHECK(esp_timer_start_periodic(periodic_timer, LV_TICK_PERIOD_MS * 1000));
 
         /*** Create simple label and show LVGL version ***/
+ 
+        //lv_button_demo(); // lvl buttons
+        security_pad();
+        ws_main();
+        bool started = false;
+        
+        esp_event_loop_args_t loop_args = {
+         .queue_size = 5,
+         .task_name = NULL // no task will be created
+        };
+        esp_event_loop_create(&loop_args, &loop_without_task);
+        ESP_ERROR_CHECK(esp_event_handler_register_with(loop_without_task, TASK_EVENTS, TASK_ITERATION_EVENT, application_task, loop_without_task));
 
-        sprintf(txt, "WT32-SC01 with LVGL v%d.%d.%d", lv_version_major(), lv_version_minor(), lv_version_patch());
+        xTaskCreate(application_task, "application_task", 2048, NULL, uxTaskPriorityGet(NULL), NULL);
 
-        lv_obj_t *label = lv_label_create(lv_scr_act()); // full screen as the parent
-        lv_label_set_text(label, txt);                   // set label text
-        lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 20);    // Center but 20 from the top
-
-        tlabel = lv_label_create(lv_scr_act());         // full screen as the parent
-        lv_label_set_text(tlabel, "Touch:(000,000)");   // set label text
-        lv_obj_align(tlabel, LV_ALIGN_TOP_RIGHT, 0, 0); // Center but 20 from the top
-
-        lv_button_demo(); // lvl buttons
-
-        while (1)
-        {
-            lv_timer_handler(); /* let the GUI do its work */
-            vTaskDelay(1);
+        if (!started){
+            websocket_app_start();
+            started = true;
         }
+   
     }
 }
 
@@ -128,70 +147,80 @@ void touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data)
         data->point.y = touchY;
 
         sprintf(txt, "Touch:(%03d,%03d)", touchX, touchY);
-        lv_label_set_text(tlabel, txt); // set label text
+        
     }
 }
-
-/* Counter button event handler */
-static void counter_event_handler(lv_event_t *e)
+void handle_keypress(const char *inp){
+printf(inp);
+if (!strcmp(inp, "Clear")){
+  lv_label_set_text(lbl_kbd,"");
+  lv_label_set_text(lbl_status,"Cleared");
+  return;
+}
+else if (!strcmp(inp, "Submit"))
 {
+  lv_label_set_text(lbl_kbd,"");
+  lv_label_set_text(lbl_status,"Submitted");
+  /* code */
+  return;
+}
+//txt = lv_btnmatrix_get_btn_text(btn1, inp);
+lv_label_ins_text(lbl_kbd, LV_LABEL_POS_LAST, inp);
+lv_label_set_text(lbl_status,"Status");
+
+}
+static void event_handler_btn(lv_event_t *e){
     lv_event_code_t code = lv_event_get_code(e);
-    lv_obj_t *btn = lv_event_get_target(e);
-    if (code == LV_EVENT_CLICKED)
-    {
-        static uint8_t cnt = 0;
-        cnt++;
-
-        /*Get the first child of the button which is the label and change its text*/
-        lv_obj_t *label = lv_obj_get_child(btn, 0);
-        lv_label_set_text_fmt(label, "Button: %d", cnt);
-        LV_LOG_USER("Clicked");
-        ESP_LOGI(TAG, "Clicked");
-    }
+    if (code == LV_EVENT_RELEASED){
+      handle_keypress(lv_btnmatrix_get_btn_text(btn1, lv_btnmatrix_get_selected_btn(btn1)));
+      }
 }
 
-/* Toggle button event handler */
-static void toggle_event_handler(lv_event_t *e)
-{
-    lv_event_code_t code = lv_event_get_code(e);
-    if (code == LV_EVENT_VALUE_CHANGED)
-    {
-        LV_LOG_USER("Toggled");
-        ESP_LOGI(TAG, "Toggled");
-    }
-}
+void security_pad(void){
+    
+  // Screen Object
 
-/* Button with counter & Toggle Button */
-void lv_button_demo(void)
-{
-    lv_obj_t *label;
+  // Text
+  lbl_status = lv_label_create(lv_scr_act());
+  lv_label_set_long_mode(lbl_status, false);     /*Break the long lines*/
+  lv_label_set_recolor(lbl_status, true);                      /*Enable re-coloring by commands in the text*/
+  lv_label_set_text(lbl_status, "#0000ff Status# ");
+  lv_obj_set_width(lbl_status, 440);  /*Set smaller width to make the lines wrap*/
+    
+  lbl_kbd = lv_label_create(lv_scr_act());
+  lv_label_set_long_mode(lbl_kbd, false);     /*Break the long lines*/
+  lv_label_set_text(lbl_kbd, "");
+  lv_obj_set_width(lbl_kbd, 440);  /*Set smaller width to make the lines wrap*/
+  
+  lv_obj_t * lbl_time = lv_label_create(lv_scr_act());
+    lv_label_set_long_mode(lbl_time, false);     /*Break the long lines*/
+    lv_label_set_recolor(lbl_time, true);                      /*Enable re-coloring by commands in the text*/
+    lv_label_set_text(lbl_time, "#ff00ff Time 00:00#");
+    lv_obj_set_width(lbl_time, 440);  /*Set smaller width to make the lines wrap*/
+    
+  // Set Label Locations
+    lv_obj_set_height(lbl_status, 20);  /*Set smaller width to make the lines wrap*/
+    lv_obj_set_pos(lbl_status, 20, 290);
+    lv_obj_set_height(lbl_time, 20);  /*Set smaller width to make the lines wrap*/
+    lv_obj_set_pos(lbl_time, 20, 10);
+    lv_obj_set_height(lbl_kbd, 20);  /*Set smaller width to make the lines wrap*/
+    lv_obj_set_pos(lbl_kbd, 220, 10);
+  static const char * btnm_map[] = {"1", "2", "3", "\n", 
+                                  "4", "5", "6", "\n", 
+                                  "7", "8", "9", "\n",
+                                  "Clear", "0",  "Submit",""
+                                 };
+  // BUtton 1
+  btn1 = lv_btnmatrix_create(lv_scr_act());
+  lv_obj_add_event_cb(btn1, event_handler_btn, LV_EVENT_ALL, NULL);
+  lv_btnmatrix_set_map(btn1, btnm_map);
+  lv_obj_set_size(btn1, 460, 260);
+  lv_obj_set_pos(btn1, 0, 40);
+  lv_btnmatrix_set_btn_width(btn1, 9, 2);        /*Make "Action1" twice as wide as "Action2"*/
+  lv_btnmatrix_set_btn_width(btn1, 11, 2);        /*Make "Action1" twice as wide as "Action2"*/
 
-    // Button with counter
-    lv_obj_t *btn1 = lv_btn_create(lv_scr_act());
-    lv_obj_add_event_cb(btn1, counter_event_handler, LV_EVENT_ALL, NULL);
+  lv_obj_align(btn1, LV_ALIGN_CENTER, 0, 0);
 
-    lv_obj_set_pos(btn1, 100, 100); /*Set its position*/
-    lv_obj_set_size(btn1, 120, 50); /*Set its size*/
-
-    label = lv_label_create(btn1);
-    lv_label_set_text(label, "Button");
-    lv_obj_center(label);
-
-    // Toggle button
-    lv_obj_t *btn2 = lv_btn_create(lv_scr_act());
-    lv_obj_add_event_cb(btn2, toggle_event_handler, LV_EVENT_ALL, NULL);
-    lv_obj_add_flag(btn2, LV_OBJ_FLAG_CHECKABLE);
-    lv_obj_set_pos(btn2, 250, 100); /*Set its position*/
-    lv_obj_set_size(btn2, 120, 50); /*Set its size*/
-
-    label = lv_label_create(btn2);
-    lv_label_set_text(label, "Toggle Button");
-    lv_obj_center(label);
-}
-
-/* Setting up tick task for lvgl */
-static void lv_tick_task(void *arg)
-{
-    (void)arg;
-    lv_tick_inc(LV_TICK_PERIOD_MS);
+  // Screen load
+  lv_scr_load(lv_scr_act());
 }
